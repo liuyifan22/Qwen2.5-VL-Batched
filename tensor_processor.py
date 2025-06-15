@@ -1,0 +1,90 @@
+import torch
+from transformers.models.qwen2_5_vl.processing_qwen2_5_vl import Qwen2_5_VLProcessor, BatchFeature
+
+
+# transformers version : transformers              4.51.1                   pypi_0    pypi
+
+class QwenProc(Qwen2_5_VLProcessor):
+    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, **kwargs):
+        super().__init__(image_processor, tokenizer, chat_template=chat_template)
+        self._mean = torch.tensor(self.image_processor.image_mean)
+        self._std = torch.tensor(self.image_processor.image_std)
+        self._patch_size = self.image_processor.patch_size
+        self._merge_size= self.image_processor.merge_size
+        self._temporal_patch_size= self.image_processor.temporal_patch_size
+    def process_images(self, images):
+        # Images must have shape (B, 3, h, w) and be in [0, 1]
+        # Normalize first
+        images = images - self._mean.to(images.device)[None, :, None, None]
+        images = images / self._std.to(images.device)[None, :, None, None]
+        # Patchify: pad if necessary
+        if images.shape[0] % self._temporal_patch_size != 0:
+            pad_len = (
+                self._temporal_patch_size
+                - (images.shape[0] % self._temporal_patch_size)
+            )
+            repeats = images[-1:].repeat(pad_len, 1, 1, 1)
+            images = torch.cat([images, repeats])
+        # Reshape contiguously
+        b, channel, h, w = images.shape
+        grid_h = h // self._patch_size
+        grid_w = w // self._patch_size
+        grid_t = b // self._temporal_patch_size
+        images = images.reshape(
+            grid_t,
+            self._temporal_patch_size,
+            channel,
+            grid_h // self._merge_size,
+            self._merge_size,
+            self._patch_size,
+            grid_w // self._merge_size,
+            self._merge_size,
+            self._patch_size
+        ).permute(0, 3, 6, 4, 7, 2, 1, 5, 8)
+        # Reshape in a weird way
+        flattened = images.reshape(
+            grid_t * grid_h * grid_w,
+            channel * self._temporal_patch_size * self._patch_size**2
+        )
+        image_grid_thw = (grid_t, grid_h, grid_w)
+        return flattened, torch.tensor(image_grid_thw)[None]
+    def __call__(
+        self,
+        images=None,
+        text=None,
+        videos=None,
+        **kwargs,
+    ):
+        output_kwargs = {
+            'text_kwargs': {'padding': True, 'return_tensors': 'pt'},
+            'images_kwargs': {'return_tensors': 'pt'},
+            'audio_kwargs': {'padding': True, 'return_tensors': 'pt'},
+            'videos_kwargs': {'fps': 2.0, 'return_tensors': 'pt'},
+            'common_kwargs': {'return_tensors': 'pt'}
+        }
+        image_inputs, image_grid_thw = self.process_images(images=images)
+        if not isinstance(text, list):
+            text = [text]
+        if image_grid_thw is not None:
+            merge_length = self.image_processor.merge_size**2
+            index = 0
+            for i in range(len(text)):
+                while self.image_token in text[i]:
+                    text[i] = text[i].replace(
+                        self.image_token,
+                        "<|placeholder|>" * (image_grid_thw[index].prod() // merge_length),
+                        1,
+                    )
+                    index += 1
+                text[i] = text[i].replace("<|placeholder|>", self.image_token)
+        text_inputs = self.tokenizer(text, **output_kwargs["text_kwargs"])
+        
+        
+        image_data = {
+            "pixel_values": image_inputs,
+            "image_grid_thw": image_grid_thw
+        }
+        
+        return BatchFeature(data={**text_inputs, **image_data})
+        
+        # return BatchFeature(data={**text_inputs, **image_inputs})
