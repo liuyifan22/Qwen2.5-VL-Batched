@@ -984,8 +984,21 @@ class Qwen2_5_VLFlashAttention2(Qwen2_5_VLAttention):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+        position_embeddings_list: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
     ):
+        
+        position_embeddings = (
+            torch.stack([pe[0] for pe in position_embeddings_list], dim=0),  # cos embeddings
+            torch.stack([pe[1] for pe in position_embeddings_list], dim=0)   # sin embeddings
+        )
+
+        # (Pdb) hidden_states.shape
+        # torch.Size([4, 1, 140, 2048])
+        # (Pdb) attention_mask.shape
+        # torch.Size([4, 1, 1, 140, 140])
+        if hidden_states.dim() == 4:
+            hidden_states = hidden_states.squeeze(1)  # Remove the sequence dimension if it is 1 
+            attention_mask = attention_mask.squeeze(1)  # Remove the sequence dimension if it is 1
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
@@ -998,6 +1011,9 @@ class Qwen2_5_VLFlashAttention2(Qwen2_5_VLAttention):
 
         # Because the input can be padded, the absolute sequence length depends on the max position id.
         cos, sin = position_embeddings
+        cos=cos[0]
+        sin=sin[0] # all the same
+        import pdb; pdb.set_trace()
         query_states, key_states = apply_multimodal_rotary_pos_emb(
             query_states, key_states, cos, sin, self.rope_scaling["mrope_section"]
         )
@@ -1048,6 +1064,9 @@ class Qwen2_5_VLFlashAttention2(Qwen2_5_VLAttention):
         else:
             sliding_window = None
 
+
+        import pdb; pdb.set_trace()
+        # /opt/conda/conda-bld/pytorch_1729647382455/work/aten/src/ATen/native/cuda/ScatterGatherKernel.cu:144: operator(): block: [291,0,0], thread: [15,0,0] Assertion `idx_dim >= 0 && idx_dim < index_size && "index out of bounds"` failed.
         attn_output = _flash_attention_forward(
             query_states,
             key_states,
@@ -1194,7 +1213,7 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask_indices: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Tuple[torch.FloatTensor]] = None,
         output_attentions: Optional[bool] = False,
@@ -1234,15 +1253,13 @@ class Qwen2_5_VLDecoderLayer(nn.Module):
         """This function is already modified"""
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
             hidden_states=hidden_states,
-            attention_mask_indices=attention_mask_indices,
+            attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
             cache_position=cache_position,
-            position_embeddings=position_embeddings,
-            text_length= text_length,
-            use_text=use_text
+            position_embeddings_list=position_embeddings,
         )
         hidden_states = residual + hidden_states
 
@@ -1354,7 +1371,11 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
         hidden_states = inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        position_embeddings_list = []
+        for i in range(position_ids.shape[0]):
+            position_embeddings = self.rotary_emb(hidden_states[i], position_ids[i])
+            position_embeddings_list.append(position_embeddings)
+        
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -1375,7 +1396,7 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
                     output_attentions,
                     use_cache,
                     cache_position,
-                    position_embeddings,
+                    position_embeddings_list,
                 )
             else:
                 layer_outputs = decoder_layer(
@@ -1386,7 +1407,7 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
                     output_attentions=output_attentions,
                     use_cache=use_cache,
                     cache_position=cache_position,
-                    position_embeddings=position_embeddings,
+                    position_embeddings=position_embeddings_list,
                 )
 
             hidden_states = layer_outputs[0]
