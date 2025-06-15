@@ -978,17 +978,14 @@ class Qwen2_5_VLFlashAttention2(Qwen2_5_VLAttention):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask_indices: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
-        text_length=0,
-        use_text=True,
     ):
-        # print("using flash attn")
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
@@ -1038,7 +1035,7 @@ class Qwen2_5_VLFlashAttention2(Qwen2_5_VLAttention):
             value_states = value_states.to(target_dtype)
 
         # Reashape to the expected shape for Flash Attention
-        query_states = query_states.transpose(1, 2) # bs, length, heads, head_dim
+        query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
 
@@ -1050,81 +1047,20 @@ class Qwen2_5_VLFlashAttention2(Qwen2_5_VLAttention):
             sliding_window = self.config.sliding_window
         else:
             sliding_window = None
-            
-        
-        # Yifan: will it make sense for text tokens to randomly attend to 8 points at each layer?
-        num_points = attention_mask_indices.shape[1]
-        text_attend_to = torch.randint(0+text_length, num_points+text_length, (attention_mask_indices.shape[-1],), device=attention_mask_indices.device).unsqueeze(0).unsqueeze(0).expand(1, text_length, -1)
-        attention_mask_indices = torch.cat([text_attend_to, attention_mask_indices], dim = 1)
-        assert attention_mask_indices.shape[1] == hidden_states.shape[1]
-        
-        # gather the indiced features from the attention mask for each token into shape (B, N, k, channel), source is hidden states
-        
-        # gather the indiced features from the attention mask for each token into shape (B, N, k, channel), source is hidden states
 
-        batch_size, seq_len, num_heads, head_dim = key_states.shape  # bs, length, heads, head_dim
-        k = attention_mask_indices.shape[-1]
-
-        # Gather indexed features for each token
-        # attention_mask_indices shape: [B, N+L, k] (includes both text and point tokens)
-        # key_states/value_states shape: [B, N+L, heads, head_dim]
-
-        # Create batch indices for gathering: [B, N+L, k]
-        batch_indices = torch.arange(batch_size, device=key_states.device).view(batch_size, 1, 1).expand(batch_size, seq_len, k)
-        token_indices = attention_mask_indices  # [B, N+L, k]
-
-        
-        # Use advanced indexing to gather features
-        # gathered_features[b, i, j] = key_states[b, attention_mask_indices[b, i, j]]
-        gathered_keys = key_states[batch_indices, token_indices]  # [B, N+L, k, heads, head_dim]
-        gathered_values = value_states[batch_indices, token_indices]  # [B, N+L, k, heads, head_dim]
-        # torch.Size([1, 4927, 8, 16, 128])
-        # import pdb; pdb.set_trace() 
-        if use_text:
-            text_keys = key_states[:, :text_length, :, :]  # [B, L, heads, head_dim]
-            text_keys = text_keys.unsqueeze(1).expand(-1, seq_len, -1, -1, -1)  # [B, N+L, L, heads, head_dim]
-            gathered_keys = torch.cat([gathered_keys, text_keys], dim=2)  # [B, N+L, k+L, heads, head_dim]
-            
-            text_values = value_states[:, :text_length, :, :]  # [B, L, heads, head_dim]
-            text_values = text_values.unsqueeze(1).expand(-1, seq_len, -1, -1, -1)  # [B, N+L, L, heads, head_dim]
-            gathered_values = torch.cat([gathered_values, text_values], dim=2)  # [B, N+L, k+L, heads, head_dim]
-            # torch.Size([1, 4927, 17, 16, 128])
-        
-        query_states = query_states.unsqueeze(2)
-        bs, NplusL, key_length, num_heads, head_dim = gathered_keys.shape
-        query_states = query_states.reshape(bs*NplusL, 1, num_heads, head_dim)
-        key_states = gathered_keys.reshape(bs*NplusL, key_length, num_heads, head_dim)
-        value_states = gathered_values.reshape(bs*NplusL, key_length, num_heads, head_dim)
-        # Use flash attention with the gathered features
-        # print(query_states.shape)
-        # print(key_states.shape)
-        # print(value_states.shape)
-        # import pdb;pdb.set_trace()
-        attn_output = flash_attn_func(
-            query_states,  # [bs*NplusL, 1, num_heads, head_dim]
-            key_states,   # [bs*NplusL, key_length, num_heads, head_dim]
-            value_states, # [bs*NplusL, key_length, num_heads, head_dim]
-            dropout_p=dropout_rate,
-            causal=False,  # Since we're using gathered keys/values, not causal
-            return_attn_probs=False
+        attn_output = _flash_attention_forward(
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            q_len,
+            dropout=dropout_rate,
+            sliding_window=sliding_window,
+            is_causal=self.is_causal,
+            use_top_left_mask=self._flash_attn_uses_top_left_mask,
         )
-        attn_output = attn_output.reshape(bs, NplusL, 1, num_heads, head_dim).squeeze(2)
-        
-        # import pdb;pdb.set_trace()
 
-        # attn_output = _flash_attention_forward(
-        #     query_states,
-        #     key_states,
-        #     value_states,
-        #     attention_mask,
-        #     q_len,
-        #     dropout=dropout_rate,
-        #     sliding_window=sliding_window,
-        #     is_causal=self.is_causal,
-        #     use_top_left_mask=self._flash_attn_uses_top_left_mask,
-        # )
-
-        attn_output = attn_output.reshape(bsz, NplusL, self.hidden_size).contiguous()
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
         attn_output = self.o_proj(attn_output)
 
         if not output_attentions:
@@ -1229,8 +1165,14 @@ class Qwen2_5_VLSdpaAttention(Qwen2_5_VLAttention):
 QWEN2_5_VL_ATTENTION_CLASSES = {
     "eager": Qwen2_5_VLAttention,
     "flash_attention_2": Qwen2_5_VLFlashAttention2,
-    "sdpa": Qwen2_5_VLSdpaAttention,
+    "sdpa": Qwen2_5_VLFlashAttention2, # here we only implement sdpa with flash attention 2, which is faster and don't face the issue of top-left mask
 }
+
+# QWEN2_5_VL_ATTENTION_CLASSES = {
+#     "eager": Qwen2_5_VLAttention,
+#     "flash_attention_2": Qwen2_5_VLFlashAttention2,
+#     "sdpa": Qwen2_5_VLSdpaAttention,
+# }
 
 
 class Qwen2_5_VLDecoderLayer(nn.Module):
@@ -1399,9 +1341,15 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
         elif position_ids.dim() == 2:
             position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
 
-        causal_mask = self._update_causal_mask(
-            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
-        )
+        causal_mask_list = []
+        assert not (inputs_embeds[0]==inputs_embeds[2]).all() # avoid all same inputs, only for debug
+
+        for i in range(position_ids.shape[0]):
+            causal_mask = self._update_causal_mask(
+                attention_mask[i], inputs_embeds[i], cache_position, past_key_values, output_attentions
+            )
+            causal_mask_list.append(causal_mask)
+        causal_mask = torch.stack(causal_mask_list, dim=0)
 
         hidden_states = inputs_embeds
 
@@ -1466,6 +1414,88 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
             attentions=all_self_attns,
         )
 
+    # def _update_causal_mask(
+    #     self,
+    #     attention_mask: torch.Tensor,
+    #     input_tensor: torch.Tensor,
+    #     cache_position: torch.Tensor,
+    #     past_key_values: Cache,
+    #     output_attentions: bool = False,
+    # ):
+    #     if self.config._attn_implementation == "flash_attention_2":
+    #         if attention_mask is not None and past_key_values is not None:
+    #             is_padding_right = attention_mask[:, -1].sum().item() != input_tensor.size()[0]
+    #             if is_padding_right:
+    #                 raise ValueError(
+    #                     "You are attempting to perform batched generation with padding_side='right'"
+    #                     " this may lead to unexpected behaviour for Flash Attention version of Qwen2_5_VL. Make sure to "
+    #                     " call `tokenizer.padding_side  = 'left'` before tokenizing the input. "
+    #                 )
+    #         if attention_mask is not None and 0.0 in attention_mask:
+    #             return attention_mask
+    #         return None
+
+    #     # For SDPA, when possible, we will rely on its `is_causal` argument instead of its `attn_mask` argument, in
+    #     # order to dispatch on Flash Attention 2. This feature is not compatible with static cache, as SDPA will fail
+    #     # to infer the attention mask.
+    #     past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+    #     using_static_cache = isinstance(past_key_values, StaticCache)
+    #     using_sliding_window_cache = isinstance(past_key_values, SlidingWindowCache)
+
+    #     # When output attentions is True, sdpa implementation's forward method calls the eager implementation's forward
+    #     if (
+    #         self.config._attn_implementation == "sdpa"
+    #         and not (using_static_cache or using_sliding_window_cache)
+    #         and not output_attentions
+    #     ):
+    #         if AttentionMaskConverter._ignore_causal_mask_sdpa(
+    #             attention_mask,
+    #             inputs_embeds=input_tensor,
+    #             past_key_values_length=past_seen_tokens,
+    #             sliding_window=self.config.sliding_window,
+    #             is_training=self.training,
+    #         ):
+    #             return None
+
+    #     dtype, device = input_tensor.dtype, input_tensor.device
+    #     min_dtype = torch.finfo(dtype).min
+    #     sequence_length = input_tensor.shape[1]
+    #     # SlidingWindowCache or StaticCache
+    #     if using_sliding_window_cache or using_static_cache:
+    #         target_length = past_key_values.get_max_cache_shape()
+    #     # DynamicCache or no cache
+    #     else:
+    #         target_length = (
+    #             attention_mask.shape[-1]
+    #             if isinstance(attention_mask, torch.Tensor)
+    #             else past_seen_tokens + sequence_length + 1
+    #         )
+
+    #     # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
+    #     causal_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
+    #         attention_mask,
+    #         sequence_length=sequence_length,
+    #         target_length=target_length,
+    #         dtype=dtype,
+    #         device=device,
+    #         cache_position=cache_position,
+    #         batch_size=input_tensor.shape[0],
+    #         config=self.config,
+    #         past_key_values=past_key_values,
+    #     )
+
+    #     if (
+    #         self.config._attn_implementation == "sdpa"
+    #         and attention_mask is not None
+    #         and attention_mask.device.type in ["cuda", "xpu"]
+    #         and not output_attentions
+    #     ):
+    #         # Attend to all tokens in fully masked rows in the causal_mask, for example the relevant first rows when
+    #         # using left padding. This is required by F.scaled_dot_product_attention memory-efficient attention path.
+    #         # Details: https://github.com/pytorch/pytorch/issues/110213
+    #         causal_mask = AttentionMaskConverter._unmask_unattended(causal_mask, min_dtype)
+
+    #     return causal_mask
     def _update_causal_mask(
         self,
         attention_mask: torch.Tensor,
@@ -1474,79 +1504,36 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
         past_key_values: Cache,
         output_attentions: bool = False,
     ):
-        if self.config._attn_implementation == "flash_attention_2":
-            if attention_mask is not None and past_key_values is not None:
-                is_padding_right = attention_mask[:, -1].sum().item() != input_tensor.size()[0]
-                if is_padding_right:
-                    raise ValueError(
-                        "You are attempting to perform batched generation with padding_side='right'"
-                        " this may lead to unexpected behaviour for Flash Attention version of Qwen2_5_VL. Make sure to "
-                        " call `tokenizer.padding_side  = 'left'` before tokenizing the input. "
-                    )
-            if attention_mask is not None and 0.0 in attention_mask:
-                return attention_mask
-            return None
-
-        # For SDPA, when possible, we will rely on its `is_causal` argument instead of its `attn_mask` argument, in
-        # order to dispatch on Flash Attention 2. This feature is not compatible with static cache, as SDPA will fail
-        # to infer the attention mask.
-        past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-        using_static_cache = isinstance(past_key_values, StaticCache)
-        using_sliding_window_cache = isinstance(past_key_values, SlidingWindowCache)
-
-        # When output attentions is True, sdpa implementation's forward method calls the eager implementation's forward
-        if (
-            self.config._attn_implementation == "sdpa"
-            and not (using_static_cache or using_sliding_window_cache)
-            and not output_attentions
-        ):
-            if AttentionMaskConverter._ignore_causal_mask_sdpa(
-                attention_mask,
-                inputs_embeds=input_tensor,
-                past_key_values_length=past_seen_tokens,
-                sliding_window=self.config.sliding_window,
-                is_training=self.training,
-            ):
-                return None
-
+        # Skip Flash Attention's None optimization for batch processing
+        # Force explicit causal mask creation
+        
         dtype, device = input_tensor.dtype, input_tensor.device
         min_dtype = torch.finfo(dtype).min
         sequence_length = input_tensor.shape[1]
-        # SlidingWindowCache or StaticCache
-        if using_sliding_window_cache or using_static_cache:
-            target_length = past_key_values.get_max_cache_shape()
-        # DynamicCache or no cache
-        else:
-            target_length = (
-                attention_mask.shape[-1]
-                if isinstance(attention_mask, torch.Tensor)
-                else past_seen_tokens + sequence_length + 1
-            )
-
-        # In case the provided `attention` mask is 2D, we generate a causal mask here (4D).
-        causal_mask = self._prepare_4d_causal_attention_mask_with_cache_position(
-            attention_mask,
-            sequence_length=sequence_length,
-            target_length=target_length,
-            dtype=dtype,
-            device=device,
-            cache_position=cache_position,
-            batch_size=input_tensor.shape[0],
-            config=self.config,
-            past_key_values=past_key_values,
+        
+        # Always create explicit causal mask
+        causal_mask = torch.full(
+            (sequence_length, sequence_length), 
+            fill_value=min_dtype, 
+            dtype=dtype, 
+            device=device
         )
-
-        if (
-            self.config._attn_implementation == "sdpa"
-            and attention_mask is not None
-            and attention_mask.device.type in ["cuda", "xpu"]
-            and not output_attentions
-        ):
-            # Attend to all tokens in fully masked rows in the causal_mask, for example the relevant first rows when
-            # using left padding. This is required by F.scaled_dot_product_attention memory-efficient attention path.
-            # Details: https://github.com/pytorch/pytorch/issues/110213
-            causal_mask = AttentionMaskConverter._unmask_unattended(causal_mask, min_dtype)
-
+        
+        # Make it causal (lower triangular)
+        diagonal_attend_mask = torch.arange(sequence_length, device=device) > torch.arange(sequence_length, device=device)[:, None]
+        causal_mask.masked_fill_(diagonal_attend_mask, 0)
+        
+        # Add batch and head dimensions
+        causal_mask = causal_mask[None, None, :, :].expand(input_tensor.shape[0], 1, -1, -1)
+        
+        # Apply attention mask if provided
+        if attention_mask is not None:
+            causal_mask = causal_mask.clone()
+            mask_length = attention_mask.shape[-1]
+            padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[:, None, None, :].to(causal_mask.device)
+            padding_mask = padding_mask == 0
+            causal_mask[:, :, :, :mask_length] = causal_mask[:, :, :, :mask_length].masked_fill(padding_mask, min_dtype)
+        
         return causal_mask
 
     @staticmethod
@@ -2127,6 +2114,146 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
             attentions=outputs.attentions,
             rope_deltas=self.rope_deltas,
         )
+        
+        
+        
+    def batched_forward(
+        self,
+        input_ids_list: torch.LongTensor = None,
+        attention_mask_list: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        pixel_values_list: Optional[torch.Tensor] = None,
+        pixel_values_videos: Optional[torch.FloatTensor] = None,
+        image_grid_thw_list: Optional[torch.LongTensor] = None,
+        video_grid_thw: Optional[torch.LongTensor] = None,
+        rope_deltas: Optional[torch.LongTensor] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        second_per_grid_ts: Optional[torch.Tensor] = None,
+    ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
+        r"""
+            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
+                config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
+                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+
+        Returns:
+
+        Example:
+
+        ```python
+        >>> from PIL import Image
+        >>> import requests
+        >>> from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+
+        >>> model = Qwen2_5_VLForConditionalGeneration.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
+        >>> processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct")
+
+        >>> messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "What is shown in this image?"},
+                ],
+            },
+        ]
+        >>> url = "https://www.ilankelman.org/stopsigns/australia.jpg"
+        >>> image = Image.open(requests.get(url, stream=True).raw)
+
+        >>> text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        >>> inputs = processor(text=[text], images=[image], vision_infos=[vision_infos])
+
+        >>> # Generate
+        >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
+        >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        "The image shows a street scene with a red stop sign in the foreground. In the background, there is a large red gate with Chinese characters ..."
+        ```"""
+
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        
+        
+        position_ids_tensor = []
+        attention_mask_tensor = []
+        inputs_embeds_tensor = []
+        # this is easy job, no computation at all, don't want to batchify
+        # Process each input independently
+        for input_ids, attention_mask, pixel_values, image_grid_thw in zip(
+            input_ids_list,
+            attention_mask_list,
+            pixel_values_list,
+            image_grid_thw_list,
+        ):
+            # Create fresh inputs_embeds for each input (remove the if condition)
+            current_inputs_embeds = self.model.embed_tokens(input_ids)
+            
+            if pixel_values is not None:
+                pixel_values = pixel_values.type(self.visual.dtype)
+                image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
+                n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
+                n_image_features = image_embeds.shape[0]
+                if n_image_tokens != n_image_features:
+                    raise ValueError(
+                        f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
+                    )
+
+                mask = input_ids == self.config.image_token_id
+                mask_unsqueezed = mask.unsqueeze(-1)
+                mask_expanded = mask_unsqueezed.expand_as(current_inputs_embeds)
+                image_mask = mask_expanded.to(current_inputs_embeds.device)
+
+                image_embeds = image_embeds.to(current_inputs_embeds.device, current_inputs_embeds.dtype)
+                current_inputs_embeds = current_inputs_embeds.masked_scatter(image_mask, image_embeds)
+
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(current_inputs_embeds.device)
+
+            # Calculate position_ids for each input independently
+            current_position_ids, current_rope_deltas = self.get_rope_index(
+                input_ids,
+                image_grid_thw,
+                video_grid_thw,
+                second_per_grid_ts,
+                attention_mask,
+            )
+            
+            position_ids_tensor.append(current_position_ids)
+            attention_mask_tensor.append(attention_mask)
+            inputs_embeds_tensor.append(current_inputs_embeds)
+        
+        position_ids = torch.stack(position_ids_tensor, dim=0) # torch.Size([4, 3, 1, 140])
+        attention_mask = torch.stack(attention_mask_tensor, dim=0) # torch.Size([4, 1, 140])
+        inputs_embeds = torch.stack(inputs_embeds_tensor, dim=0) # torch.Size([4, 1, 140, 2048])
+
+
+        outputs = self.model(
+            input_ids=None,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            past_key_values=None,
+            inputs_embeds=inputs_embeds,
+            use_cache=False,
+            output_attentions=False,
+            output_hidden_states=True, # we can use any layer
+            return_dict=return_dict,
+            cache_position=cache_position,
+        )
+
+        hidden_states = outputs[0]
+        
+        return hidden_states
+        
+        
 
     def prepare_inputs_for_generation(
         self,
@@ -2292,6 +2419,54 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
             model_kwargs["encoder_outputs"] = _expand_dict_for_generation(model_kwargs["encoder_outputs"])
 
         return input_ids, model_kwargs
+
+
+
+def just_pad(input_list, device):
+    """
+    Pad input_ids and attention_mask to same length and return as dict with lists
+    """
+    # Extract all components
+    input_ids_list = [inp['input_ids'].squeeze(0) for inp in input_list]
+    attention_mask_list = [inp['attention_mask'].squeeze(0) for inp in input_list]
+    
+    # Find max sequence length
+    max_seq_len = max(ids.shape[0] for ids in input_ids_list)
+    
+    # Initialize result lists
+    padded_input_ids = []
+    padded_attention_masks = []
+    pixel_values_list = []
+    image_grid_thw_list = []
+    
+    for i, inputs in enumerate(input_list):
+        ids = input_ids_list[i]
+        mask = attention_mask_list[i]
+        
+        pad_len = max_seq_len - ids.shape[0]
+        
+        if pad_len > 0:
+            # Pad with zeros (or tokenizer.pad_token_id)
+            padded_ids = torch.cat([ids, torch.zeros(pad_len, dtype=ids.dtype, device=ids.device)])
+            padded_mask = torch.cat([mask, torch.zeros(pad_len, dtype=mask.dtype, device=mask.device)])
+        else:
+            padded_ids = ids
+            padded_mask = mask
+        
+        # Add to lists (with batch dimension)
+        padded_input_ids.append(padded_ids.unsqueeze(0).to(device))
+        padded_attention_masks.append(padded_mask.unsqueeze(0).to(device))
+        pixel_values_list.append(inputs['pixel_values'].to(device))
+        image_grid_thw_list.append(inputs['image_grid_thw'].to(device))
+    
+    # Return as dict with lists
+    return {
+        'input_ids_list': padded_input_ids,
+        'attention_mask_list': padded_attention_masks,
+        'pixel_values_list': pixel_values_list,
+        'image_grid_thw_list': image_grid_thw_list
+    }
+
 
 
 __all__ = ["Qwen2_5_VLForConditionalGeneration", "Qwen2_5_VLModel", "Qwen2_5_VLPreTrainedModel"]

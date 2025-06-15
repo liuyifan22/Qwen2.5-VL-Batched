@@ -37,8 +37,9 @@ processor_tensor = QwenProc.from_pretrained(model_name)
 processor_original = Qwen2_5_VLProcessor.from_pretrained(model_name)
 
 
-input_images = torch.rand(4, 8, 3, 224, 224).to(device)  # 4 batches, each with 16 images of shape (3, 336, 336)
+input_images = torch.rand(4, 2, 3, 224, 224).to(device)  # 4 batches, each with 16 images of shape (3, 336, 336)
 # import pdb; pdb.set_trace()
+images_per_batch = input_images.shape[1]  # 16 images per batch
 
 pil_images_all = []
 for i in range(input_images.shape[0]):
@@ -49,8 +50,8 @@ for i in range(input_images.shape[0]):
 
 text_list = ["Was kann Ich wissen?", "Was soll Ich tun?", "Was darf Ich hoffen?", "Was ist der Mensch?"]
 
-
-
+# add image 
+text_list = [text +" ".join(["<|vision_start|><|image_pad|><|vision_end|>"] * images_per_batch) for text in text_list]
 
 full_input_list = []
 # here using a "for" in processor is not too bad. Can easily be converted to batch processing for images
@@ -64,11 +65,11 @@ for i in range(len(input_images)):
     images_pil = pil_images_all[i]   # List of 16 PIL Images
     
     # Process with tensor processor
-    inputs_tensor = processor_tensor(
-        images=images_tensor,
-        text=text,
-        return_tensors='pt',
-    )
+    # inputs_tensor = processor_tensor(
+    #     images=images_tensor,
+    #     text=text,
+    #     return_tensors='pt',
+    # )
     
     # Process with original processor
     inputs_original = processor_original(
@@ -122,66 +123,30 @@ for i in range(len(input_images)):
         import pdb; pdb.set_trace()
     
 
-"""Test image_encoder"""
+"""Test the whole model """
 # here we must use batched processing, putting all the images from all batches together
 
 
-# import pdb; pdb.set_trace()
-with torch.no_grad():
-    visual_original = model_original.visual.to(device)
-    visual_batched = model_batched.visual.to(device)
+# first pass through the original model one by one
+outputs_original = []
+for inputs in full_input_list:
+    # Move inputs to device
+    inputs = {k: v.to(device) for k, v in inputs.items()}
+    
+    # Forward through the original model
+    with torch.no_grad():
+        output = model_original(**inputs)
+    
+    outputs_original.append(output)
 
 
-    # Process all images together
-    processed_images = torch.cat([inputs['pixel_values'] for inputs in full_input_list], dim=0).to(device)
-    processor_grid_thw = torch.cat([inputs['image_grid_thw'] for inputs in full_input_list], dim=0).to(device)
-    # processed_images = full_input_list[0]['pixel_values'].to(device)
-    # processor_grid_thw = full_input_list[0]['image_grid_thw'].to(device)
-    
+# forward in a batched manner
 
-    start_time = time.time()
-    vision_outputs_original = visual_original(
-                    processed_images, 
-                    grid_thw=processor_grid_thw
-                )    
+# Forward through our batched model
 
-    mid_time = time.time()
-    print(f"Original vision processing time: {mid_time - start_time:.4f} seconds")
-
-    vision_outputs_batched = visual_batched(
-                    processed_images, 
-                    grid_thw=processor_grid_thw
-                )
-    end_time = time.time()
-    print(f"Batched vision processing time: {end_time - mid_time:.4f} seconds")
-
-    # test 1
-    # Original vision processing time: 1.1970 seconds
-    # Batched vision processing time: 0.0395 seconds
-    
-    # test 2
-    # Original vision processing time: 1.0908 seconds
-    # Batched vision processing time: 0.0397 seconds 
-    # 25x faster for 32 images
-    
-    import pdb; pdb.set_trace()
-    
-    # Check if the outputs match
-    # Calculate relative error
-    diff = vision_outputs_batched - vision_outputs_original
-    print(f"Max absolute error: {torch.max(torch.abs(diff)):.6f}")
-    print(f"Mean absolute error: {torch.mean(torch.abs(diff)):.6f}")
-    
-    
-    relative_error = torch.abs(diff) / (torch.abs(vision_outputs_original) + 1e-8)
-    max_relative_error = torch.max(relative_error)
-    mean_relative_error = torch.mean(relative_error)
-    
-    print(f"Max relative error: {max_relative_error:.6f}")
-    print(f"Mean relative error: {mean_relative_error:.6f}")
-    
-    assert torch.allclose(vision_outputs_original, vision_outputs_batched, atol=1e-6), "Vision outputs do not match!"
-    
+from modeling_qwen2_5_vl_batched import just_pad
+inputs_padded = just_pad(full_input_list, device=device)
+outputs_batched = model_batched.batched_forward(**inputs_padded)
 
 
-    
+import pdb; pdb.set_trace()
