@@ -85,40 +85,24 @@ for i in range(len(input_images)):
     
     
     """Test the QwenProc"""
-    if 0: 
+    if 1: 
         # Check if the tensor processor outputs match the original processor
         assert (inputs_tensor['input_ids']==inputs_original['input_ids']).all()
         assert (inputs_tensor['attention_mask']==inputs_original['attention_mask']).all()
         print(inputs_tensor['image_grid_thw'])
         print(inputs_original['image_grid_thw'])
-        #     tensor([[ 8, 24, 24]])
-        # tensor([[ 1, 24, 24],
-        #         [ 1, 24, 24],
-        #         [ 1, 24, 24],
-        #         [ 1, 24, 24],
-        #         [ 1, 24, 24],
-        #         [ 1, 24, 24],
-        #         [ 1, 24, 24],
-        #         [ 1, 24, 24],
-        #         [ 1, 24, 24],
-        #         [ 1, 24, 24],
-        #         [ 1, 24, 24],
-        #         [ 1, 24, 24],
-        #         [ 1, 24, 24],
-        #         [ 1, 24, 24],
-        #         [ 1, 24, 24],
-        #         [ 1, 24, 24]])
-        # Traceback (most recent call last):
-        #   File "/home/yifanliu/qwen_batched/testbench.py", line 81, in <module>
-        #     assert (inputs_tensor['image_grid_thw'][0]==inputs_original['image_grid_thw'][0]).all()
-        # AssertionError
-
-        """a bug: QwenProc is giving [8,24,24] out of 16 images, where it should be [1,24,24] * 16 """
+        
         
         
         assert (inputs_tensor['image_grid_thw'][0]==inputs_original['image_grid_thw'][0]).all()
-        assert torch.allclose(inputs_tensor['pixel_values'], inputs_original['pixel_values'], atol=1e-6)
-        assert (inputs_tensor['image_grid_thw'][0]==inputs_original['image_grid_thw'][0]).all()
+        
+        # print the max relative error
+        print(f"Max relative error in pixel_values: {torch.max(torch.abs(inputs_tensor['pixel_values'].to(device) - inputs_original['pixel_values'].to(device))):.12f}")
+        print(f"Mean relative error in pixel_values: {torch.mean(torch.abs(inputs_tensor['pixel_values'].to(device) - inputs_original['pixel_values'].to(device))):.12f}")
+        
+        
+        assert torch.allclose(inputs_tensor['pixel_values'].to(device), inputs_original['pixel_values'].to(device), atol=1e-6)
+        
         import pdb; pdb.set_trace()
     
 

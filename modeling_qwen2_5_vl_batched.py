@@ -315,7 +315,7 @@ class Qwen2_5_VLVisionSdpaAttention(nn.Module):
         
         batch_size, seq_length, _ = hidden_states.shape
         
-        print("Qwen2_5_VLVisionSdpaAttention_ours forward called")
+        # print("Qwen2_5_VLVisionSdpaAttention_ours forward called")
         """previously, we are not using cu_seqlens, which is bad."""
         # Modified to support Batch processing
         q, k, v = self.qkv(hidden_states).reshape(batch_size, seq_length, 3, self.num_heads, -1).permute(0, 2, 3, 1, 4).unbind(1)
@@ -987,22 +987,24 @@ class Qwen2_5_VLFlashAttention2(Qwen2_5_VLAttention):
         position_embeddings_list: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
     ):
         
-        position_embeddings = (
-            torch.stack([pe[0] for pe in position_embeddings_list], dim=0),  # cos embeddings
-            torch.stack([pe[1] for pe in position_embeddings_list], dim=0)   # sin embeddings
-        )
+        # position_embeddings = (
+        #     torch.stack([pe[0] for pe in position_embeddings_list], dim=0),  # cos embeddings
+        #     torch.stack([pe[1] for pe in position_embeddings_list], dim=0)   # sin embeddings
+        # )
 
         # (Pdb) hidden_states.shape
         # torch.Size([4, 1, 140, 2048])
         # (Pdb) attention_mask.shape
         # torch.Size([4, 1, 1, 140, 140])
         if hidden_states.dim() == 4:
-            hidden_states = hidden_states.squeeze(1)  # Remove the sequence dimension if it is 1 
-            attention_mask = attention_mask.squeeze(1)  # Remove the sequence dimension if it is 1
+            hidden_states = hidden_states.squeeze(1)  # Remove the redundant batch dimension if it is 1 
+            attention_mask = attention_mask.squeeze(1)  # Remove the redundant batch dimension if it is 1
         bsz, q_len, _ = hidden_states.size()
 
+        # import pdb; pdb.set_trace()
+        # torch.Size([4, 140, 2048])
         query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
+        key_states = self.k_proj(hidden_states) # why it is projected to torch.Size([4, 140, 256])
         value_states = self.v_proj(hidden_states)
 
         query_states = query_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
@@ -1010,19 +1012,29 @@ class Qwen2_5_VLFlashAttention2(Qwen2_5_VLAttention):
         value_states = value_states.view(bsz, q_len, -1, self.head_dim).transpose(1, 2)
 
         # Because the input can be padded, the absolute sequence length depends on the max position id.
-        cos, sin = position_embeddings
-        cos=cos[0]
-        sin=sin[0] # all the same
-        import pdb; pdb.set_trace()
-        query_states, key_states = apply_multimodal_rotary_pos_emb(
-            query_states, key_states, cos, sin, self.rope_scaling["mrope_section"]
-        )
+        query_states_list = []
+        key_states_list = []
+        for i in range(len(position_ids)):
+            cos, sin = position_embeddings_list[i]
+            this_query_states, this_key_states = query_states[i].unsqueeze(0), key_states[i].unsqueeze(0)
+            this_query_states, this_key_states = apply_multimodal_rotary_pos_emb(
+                this_query_states, this_key_states, cos, sin, self.rope_scaling["mrope_section"]
+            )
+            query_states_list.append(this_query_states)
+            key_states_list.append(this_key_states)
+            # original
+            # query_states, key_states = apply_multimodal_rotary_pos_emb(
+            #     query_states, key_states, cos, sin, self.rope_scaling["mrope_section"]
+            # )
+        query_states = torch.cat(query_states_list, dim=0)
+        key_states = torch.cat(key_states_list, dim=0)
 
-        if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+        # if past_key_value is not None:
+        #     cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
+        #     key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         # repeat k/v heads if n_kv_heads < n_heads
+        # import pdb; pdb.set_trace()
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
         dropout_rate = 0.0 if not self.training else self.attention_dropout
@@ -1065,27 +1077,155 @@ class Qwen2_5_VLFlashAttention2(Qwen2_5_VLAttention):
             sliding_window = None
 
 
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
+        # attention_mask = attention_mask.to(query_states.dtype).contiguous()
+        query_states = query_states.contiguous()
+        key_states   = key_states.contiguous()
+        value_states = value_states.contiguous()
         # /opt/conda/conda-bld/pytorch_1729647382455/work/aten/src/ATen/native/cuda/ScatterGatherKernel.cu:144: operator(): block: [291,0,0], thread: [15,0,0] Assertion `idx_dim >= 0 && idx_dim < index_size && "index out of bounds"` failed.
+        # import pdb; pdb.set_trace()
+        """Note: attention mask for flash attention is different from the one used in the original attention module.
+        attention_mask (`torch.Tensor`, *optional*):
+            The padding mask - corresponds to a tensor of size `(batch_size, seq_len)` where 0 stands for the
+            position of padding tokens and 1 for the position of non-padding tokens.
+        
+        """
+        
+        
+        
         attn_output = _flash_attention_forward(
             query_states,
             key_states,
             value_states,
-            attention_mask,
+            attention_mask, 
             q_len,
             dropout=dropout_rate,
             sliding_window=sliding_window,
             is_causal=self.is_causal,
             use_top_left_mask=self._flash_attn_uses_top_left_mask,
         )
+        # import pdb; pdb.set_trace()
 
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
-        attn_output = self.o_proj(attn_output)
+        attn_output = self.o_proj(attn_output).unsqueeze(1) # go back to original shape [bsz, 1, q_len, hidden_size]
 
         if not output_attentions:
             attn_weights = None
 
         return attn_output, attn_weights, past_key_value
+    
+    
+
+    # def forward(
+    #     self,
+    #     hidden_states: torch.Tensor,
+    #     attention_mask: Optional[torch.Tensor] = None,
+    #     position_ids: Optional[torch.LongTensor] = None,
+    #     past_key_value: Optional[Cache] = None,
+    #     output_attentions: bool = False,
+    #     use_cache: bool = False,
+    #     cache_position: Optional[torch.LongTensor] = None,
+    #     position_embeddings_list: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    # ):
+    #     if hidden_states.dim() == 4:
+    #         hidden_states = hidden_states.squeeze(1)
+    #         if attention_mask is not None:
+    #             attention_mask = attention_mask.squeeze(1)
+                
+    #     bsz, q_len, _ = hidden_states.size()
+
+    #     # Project to Q, K, V with correct dimensions
+    #     query_states = self.q_proj(hidden_states)  # [bsz, q_len, num_heads * head_dim]
+    #     key_states = self.k_proj(hidden_states)    # [bsz, q_len, num_key_value_heads * head_dim]
+    #     value_states = self.v_proj(hidden_states)  # [bsz, q_len, num_key_value_heads * head_dim]
+
+    #     # Reshape with correct head counts
+    #     query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+    #     key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+    #     value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+
+    #     # Apply rotary embeddings correctly for each batch item
+    #     if position_embeddings_list is not None:
+    #         query_states_list = []
+    #         key_states_list = []
+            
+    #         for i in range(bsz):
+    #             cos, sin = position_embeddings_list[i]
+                
+    #             # Extract individual batch items
+    #             q_i = query_states[i:i+1]  # [1, num_heads, q_len, head_dim]
+    #             k_i = key_states[i:i+1]   # [1, num_key_value_heads, q_len, head_dim]
+                
+    #             # Apply rotary embeddings
+    #             q_rotated, k_rotated = apply_multimodal_rotary_pos_emb(
+    #                 q_i, k_i, cos, sin, self.rope_scaling["mrope_section"]
+    #             )
+                
+    #             query_states_list.append(q_rotated)
+    #             key_states_list.append(k_rotated)
+            
+    #         # Concatenate back
+    #         query_states = torch.cat(query_states_list, dim=0)
+    #         key_states = torch.cat(key_states_list, dim=0)
+
+    #     # Handle past key values if needed
+    #     if past_key_value is not None:
+    #         # Note: cos/sin here should be from the last batch item or handled differently
+    #         cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+    #         key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+
+    #     # Expand key/value states to match query heads (GQA)
+    #     key_states = repeat_kv(key_states, self.num_key_value_groups)
+    #     value_states = repeat_kv(value_states, self.num_key_value_groups)
+
+    #     # Prepare for Flash Attention
+    #     dropout_rate = 0.0 if not self.training else self.attention_dropout
+
+    #     # Handle dtype casting
+    #     input_dtype = query_states.dtype
+    #     if input_dtype == torch.float32:
+    #         if torch.is_autocast_enabled():
+    #             target_dtype = torch.get_autocast_gpu_dtype()
+    #         elif hasattr(self.config, "_pre_quantization_dtype"):
+    #             target_dtype = self.config._pre_quantization_dtype
+    #         else:
+    #             target_dtype = self.q_proj.weight.dtype
+
+    #         query_states = query_states.to(target_dtype)
+    #         key_states = key_states.to(target_dtype)
+    #         value_states = value_states.to(target_dtype)
+
+    #     # Reshape for Flash Attention
+    #     query_states = query_states.transpose(1, 2)
+    #     key_states = key_states.transpose(1, 2)
+    #     value_states = value_states.transpose(1, 2)
+
+    #     # Sliding window logic
+    #     sliding_window = None
+    #     if (
+    #         self.config.use_sliding_window
+    #         and getattr(self.config, "sliding_window", None) is not None
+    #         and self.layer_idx >= self.config.max_window_layers
+    #     ):
+    #         sliding_window = self.config.sliding_window
+
+    #     # Apply Flash Attention
+    #     attn_output = _flash_attention_forward(
+    #         query_states,
+    #         key_states,
+    #         value_states,
+    #         attention_mask,
+    #         q_len,
+    #         dropout=dropout_rate,
+    #         sliding_window=sliding_window,
+    #         is_causal=self.is_causal,
+    #         use_top_left_mask=self._flash_attn_uses_top_left_mask,
+    #     )
+
+    #     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size).contiguous()
+    #     attn_output = self.o_proj(attn_output)
+
+    #     return attn_output, None, past_key_value
 
 
 class Qwen2_5_VLSdpaAttention(Qwen2_5_VLAttention):
@@ -1358,15 +1498,16 @@ class Qwen2_5_VLModel(Qwen2_5_VLPreTrainedModel):
         elif position_ids.dim() == 2:
             position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
 
-        causal_mask_list = []
-        assert not (inputs_embeds[0]==inputs_embeds[2]).all() # avoid all same inputs, only for debug
+        # causal_mask_list = []
+        # assert not (inputs_embeds[0]==inputs_embeds[2]).all() # avoid all same inputs, only for debug
 
-        for i in range(position_ids.shape[0]):
-            causal_mask = self._update_causal_mask(
-                attention_mask[i], inputs_embeds[i], cache_position, past_key_values, output_attentions
-            )
-            causal_mask_list.append(causal_mask)
-        causal_mask = torch.stack(causal_mask_list, dim=0)
+        # for i in range(position_ids.shape[0]):
+        #     causal_mask = self._update_causal_mask(
+        #         attention_mask[i], inputs_embeds[i], cache_position, past_key_values, output_attentions
+        #     )
+        #     causal_mask_list.append(causal_mask)
+        # causal_mask = torch.stack(causal_mask_list, dim=0)
+        causal_mask = attention_mask
 
         hidden_states = inputs_embeds
 

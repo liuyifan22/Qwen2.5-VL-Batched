@@ -1,6 +1,6 @@
 import torch
 from transformers.models.qwen2_5_vl.processing_qwen2_5_vl import Qwen2_5_VLProcessor, BatchFeature
-
+import einops
 
 # transformers version : transformers              4.51.1                   pypi_0    pypi
 
@@ -12,25 +12,29 @@ class QwenProc(Qwen2_5_VLProcessor):
         self._patch_size = self.image_processor.patch_size
         self._merge_size= self.image_processor.merge_size
         self._temporal_patch_size= self.image_processor.temporal_patch_size
+        
     def process_images(self, images):
         # Images must have shape (B, 3, h, w) and be in [0, 1]
         # Normalize first
         images = images - self._mean.to(images.device)[None, :, None, None]
         images = images / self._std.to(images.device)[None, :, None, None]
+        # Unsqueeze: simulate a temporal dimension of 1
+        images = images[:, None]  # (B, 1, 3, h, w)
         # Patchify: pad if necessary
-        if images.shape[0] % self._temporal_patch_size != 0:
+        if images.shape[1] % self._temporal_patch_size != 0:
             pad_len = (
                 self._temporal_patch_size
-                - (images.shape[0] % self._temporal_patch_size)
+                - (images.shape[1] % self._temporal_patch_size)
             )
-            repeats = images[-1:].repeat(pad_len, 1, 1, 1)
-            images = torch.cat([images, repeats])
+            repeats = images[:, -1:].repeat(1, pad_len, 1, 1, 1)
+            images = torch.cat([images, repeats], 1)  # (B, t, 3, h, w)
         # Reshape contiguously
-        b, channel, h, w = images.shape
+        b, t, channel, h, w = images.shape
         grid_h = h // self._patch_size
         grid_w = w // self._patch_size
-        grid_t = b // self._temporal_patch_size
+        grid_t = t // self._temporal_patch_size
         images = images.reshape(
+            b,
             grid_t,
             self._temporal_patch_size,
             channel,
@@ -40,14 +44,18 @@ class QwenProc(Qwen2_5_VLProcessor):
             grid_w // self._merge_size,
             self._merge_size,
             self._patch_size
-        ).permute(0, 3, 6, 4, 7, 2, 1, 5, 8)
-        # Reshape in a weird way
-        flattened = images.reshape(
-            grid_t * grid_h * grid_w,
-            channel * self._temporal_patch_size * self._patch_size**2
+        ).permute(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)
+        # Fix the einops pattern
+        flattened = einops.rearrange(
+            images,
+            "b gt ghd gwd m1 m2 c tp p1 p2 -> (b gt ghd m1 gwd m2) (c tp p1 p2)"
         )
-        image_grid_thw = (grid_t, grid_h, grid_w)
-        return flattened, torch.tensor(image_grid_thw)[None]
+        image_grid_thw = torch.tensor([
+            (grid_t, grid_h, grid_w)
+            for _ in range(b)
+        ])
+        return flattened, image_grid_thw
+    
     def __call__(
         self,
         images=None,

@@ -1,0 +1,2 @@
+export CUDA_VISIBLE_DEVICES=4
+python testbench_full_model.py

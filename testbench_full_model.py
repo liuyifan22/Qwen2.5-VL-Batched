@@ -31,13 +31,13 @@ def tensor_to_pil_images(tensor_images):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 model_name = 'Qwen/Qwen2.5-VL-3B-Instruct'
-model_original = Qwen2_5_VLForConditionalGenerationOriginal.from_pretrained(model_name, torch_dtype=torch.bfloat16).to(device)
-model_batched = Qwen2_5_VLForConditionalGenerationBatched.from_pretrained(model_name, torch_dtype=torch.bfloat16).to(device)
+model_original = Qwen2_5_VLForConditionalGenerationOriginal.from_pretrained(model_name, torch_dtype=torch.float16, attn_implementation = "flash_attention_2").to(device)
+model_batched = Qwen2_5_VLForConditionalGenerationBatched.from_pretrained(model_name, torch_dtype=torch.float16).to(device)
 processor_tensor = QwenProc.from_pretrained(model_name)
 processor_original = Qwen2_5_VLProcessor.from_pretrained(model_name)
 
 
-input_images = torch.rand(4, 2, 3, 224, 224).to(device)  # 4 batches, each with 16 images of shape (3, 336, 336)
+input_images = torch.rand(1, 2, 3, 224, 224).to(device)  # 4 batches, each with 16 images of shape (3, 336, 336)
 # import pdb; pdb.set_trace()
 images_per_batch = input_images.shape[1]  # 16 images per batch
 
@@ -135,7 +135,7 @@ for inputs in full_input_list:
     
     # Forward through the original model
     with torch.no_grad():
-        output = model_original(**inputs)
+        output = model_original(**inputs, output_hidden_states=True)
     
     outputs_original.append(output)
 
@@ -147,6 +147,27 @@ for inputs in full_input_list:
 from modeling_qwen2_5_vl_batched import just_pad
 inputs_padded = just_pad(full_input_list, device=device)
 outputs_batched = model_batched.batched_forward(**inputs_padded)
+# torch.Size([4, 1, 140, 2048])
+ori_out= outputs_original[0]["hidden_states"][36]
+real_length = ori_out.shape[1]
+batched_out= outputs_batched[0][:, :real_length, :]
+# Check if the outputs match
+# ori_out has shape [1, seq, dim], squeeze to [seq, dim]
+ori = ori_out.squeeze(0)
+# batched_out has shape [batch, seq, dim], take the same index = 1
+bat = batched_out[0]
+import pdb; pdb.set_trace()
+abs_error = torch.abs(bat - ori)
+rel_error = abs_error / (torch.abs(ori) + 1)
 
+print(f"Max abs error:  {abs_error.max().item():.6f}")
+print(f"Mean abs error: {abs_error.mean().item():.6f}")
+print(f"Max rel error:  {rel_error.max().item():.6f}")
+print(f"Mean rel error: {rel_error.mean().item():.6f}")
+
+# Optionally assert tolerance
+assert abs_error.max() < 1e-1, "Absolute error exceeds 1e-1"
+assert rel_error.max() < 1e-1, "Relative error exceeds 1e-1"
 
 import pdb; pdb.set_trace()
+# compare the hiddens states
