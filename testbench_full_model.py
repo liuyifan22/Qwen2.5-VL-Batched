@@ -165,9 +165,12 @@ print(f"Mean abs error: {abs_error.mean().item():.6f}")
 print(f"Max rel error:  {rel_error.max().item():.6f}")
 print(f"Mean rel error: {rel_error.mean().item():.6f}")
 
+# mean abs error: Mean abs error: 0.030487
+# Mean rel error: 0.012009
+
 # Optionally assert tolerance
-assert abs_error.max() < 1e-1, "Absolute error exceeds 1e-1"
-assert rel_error.max() < 1e-1, "Relative error exceeds 1e-1"
+assert abs_error.max() < 1e-2, "Absolute error exceeds 1e-2"
+assert rel_error.max() < 1e-2, "Relative error exceeds 1e-2"
 
 import pdb; pdb.set_trace()
 # compare the hiddens states
