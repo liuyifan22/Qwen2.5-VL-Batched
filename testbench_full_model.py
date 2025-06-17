@@ -31,13 +31,13 @@ def tensor_to_pil_images(tensor_images):
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 model_name = 'Qwen/Qwen2.5-VL-3B-Instruct'
-model_original = Qwen2_5_VLForConditionalGenerationOriginal.from_pretrained(model_name, torch_dtype=torch.float16, attn_implementation = "flash_attention_2").to(device)
-model_batched = Qwen2_5_VLForConditionalGenerationBatched.from_pretrained(model_name, torch_dtype=torch.float16).to(device)
+model_original = Qwen2_5_VLForConditionalGenerationOriginal.from_pretrained(model_name, torch_dtype=torch.float32, attn_implementation = "sdpa").to(device)
+model_batched = Qwen2_5_VLForConditionalGenerationBatched.from_pretrained(model_name, torch_dtype=torch.float32, attn_implementation = "sdpa").to(device)
 processor_tensor = QwenProc.from_pretrained(model_name)
 processor_original = Qwen2_5_VLProcessor.from_pretrained(model_name)
 
 
-input_images = torch.rand(1, 2, 3, 224, 224).to(device)  # 4 batches, each with 16 images of shape (3, 336, 336)
+input_images = torch.rand(4, 2, 3, 224, 224).to(device)  # 4 batches, each with 16 images of shape (3, 336, 336)
 # import pdb; pdb.set_trace()
 images_per_batch = input_images.shape[1]  # 16 images per batch
 
