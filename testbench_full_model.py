@@ -1,7 +1,7 @@
 from modeling_qwen2_5_vl_batched import Qwen2_5_VLForConditionalGeneration as Qwen2_5_VLForConditionalGenerationBatched
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration as Qwen2_5_VLForConditionalGenerationOriginal
 from transformers.models.qwen2_5_vl.processing_qwen2_5_vl import Qwen2_5_VLProcessor
-from tensor_processor import QwenProc
+# from tensor_processor import QwenProc
 from transformers import AutoTokenizer
 import torch
 from PIL import Image
@@ -33,7 +33,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model_name = 'Qwen/Qwen2.5-VL-3B-Instruct'
 model_original = Qwen2_5_VLForConditionalGenerationOriginal.from_pretrained(model_name, torch_dtype=torch.float32, attn_implementation = "sdpa").to(device)
 model_batched = Qwen2_5_VLForConditionalGenerationBatched.from_pretrained(model_name, torch_dtype=torch.float32, attn_implementation = "sdpa").to(device)
-processor_tensor = QwenProc.from_pretrained(model_name)
+# processor_tensor = QwenProc.from_pretrained(model_name)
 processor_original = Qwen2_5_VLProcessor.from_pretrained(model_name)
 
 
@@ -148,15 +148,15 @@ from modeling_qwen2_5_vl_batched import just_pad
 inputs_padded = just_pad(full_input_list, device=device)
 outputs_batched = model_batched.batched_forward(**inputs_padded)
 # torch.Size([4, 1, 140, 2048])
-ori_out= outputs_original[0]["hidden_states"][36]
+ori_out= outputs_original[-1]["hidden_states"][36]
 real_length = ori_out.shape[1]
-batched_out= outputs_batched[0][:, :real_length, :]
+batched_out= outputs_batched[-1][:, :real_length, :]
 # Check if the outputs match
 # ori_out has shape [1, seq, dim], squeeze to [seq, dim]
 ori = ori_out.squeeze(0)
 # batched_out has shape [batch, seq, dim], take the same index = 1
 bat = batched_out[0]
-import pdb; pdb.set_trace()
+# import pdb; pdb.set_trace()
 abs_error = torch.abs(bat - ori)
 rel_error = abs_error / (torch.abs(ori) + 1)
 

@@ -1161,7 +1161,7 @@ class Qwen2_5_VLSdpaAttention(Qwen2_5_VLAttention):
                 position_embeddings=position_embeddings_list,
             )
             
-        print("using sdpa attn")
+        # print("using sdpa attn")
 
         # Handle batched input dimension squeezing (same as FlashAttention)
         if hidden_states.dim() == 4:
