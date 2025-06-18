@@ -74,6 +74,21 @@ def forward_batched2(inputs):
     )
 
 
+@torch.no_grad()
+def forward_batched2_(inputs):
+    return model_batched.batched_forward(
+        input_ids_list=[inp for inp in inputs['input_ids'][:, None]],
+        attention_mask_list=[inp for inp in inputs['attention_mask'][:, None]],
+        pixel_values_list=[inp for inp in inputs['pixel_values'].unflatten(0, (len(inputs['input_ids']), -1))],
+        image_grid_thw_list=[inp for inp in inputs['image_grid_thw'].unflatten(0, (len(inputs['input_ids']), -1))]
+    )
+
+
+@torch.no_grad()
+def forward_batched3(inputs):
+    return model_batched.batched_forward(**inputs)
+
+
 if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -147,20 +162,51 @@ if __name__ == "__main__":
     print(f"Mean abs error: {abs_error.mean().item():.6f}")
     print(f"Max rel error:  {rel_error.max().item():.6f}")
     print(f"Mean rel error: {rel_error.mean().item():.6f}")
+
+    # Insanity: compare just_pad outputs to inputs_batched
+    inputs_padded = just_pad(full_input_list, device=device)
+    list_inputs_batched = {
+        'input_ids_list': inputs_batched['input_ids'][:, None],
+        'attention_mask_list': inputs_batched['attention_mask'][:, None],
+        'pixel_values_list': inputs_batched['pixel_values'].unflatten(0, (len(inputs_batched['input_ids']), -1)),
+        'image_grid_thw_list': inputs_batched['image_grid_thw'].unflatten(0, (len(inputs_batched['input_ids']), -1))
+    }
+    assert torch.allclose(
+        list_inputs_batched['pixel_values_list'],
+        torch.stack(inputs_padded['pixel_values_list']),
+        atol=1e-6
+    )
+    assert torch.allclose(
+        list_inputs_batched['image_grid_thw_list'],
+        torch.stack(inputs_padded['image_grid_thw_list']),
+        atol=1e-6
+    )
+    assert torch.all(
+        torch.stack(inputs_padded['input_ids_list'])
+        == list_inputs_batched['input_ids_list']*list_inputs_batched['attention_mask_list']
+    )
+    assert torch.all(
+        torch.stack(inputs_padded['attention_mask_list'])
+        == list_inputs_batched['attention_mask_list']
+    )
+    list_inputs_batched['pixel_values_list'] = torch.stack(inputs_padded['pixel_values_list'])
     # import ipdb; ipdb.set_trace()
 
     # Batched forward pass
-    for exp in range(2):
+    for exp in range(3):
         if exp == 0:
             print("Using original processor")
             outputs_batched = forward_batched(full_input_list)  # B 1 ntok 2048
-        else:
+        elif exp == 1:
             print("Using batched processor")
             outputs_batched = forward_batched2(inputs_batched)  # B 1 ntok 2048
+        else:
+            print("Using batched processor but non-batched pixel values")
+            outputs_batched = forward_batched3(list_inputs_batched)
 
         # Collect results and compare
         ori, bat = [], []
-        for i in range(1):#range(len(outputs_batched)):
+        for i in range(len(outputs_batched)):
             _tens = outputs_original[i]["hidden_states"][-1][0]
             ori.append(_tens)
             bat.append(outputs_batched[i, 0, :len(_tens)])
