@@ -2315,24 +2315,36 @@ class Qwen2_5_VLForConditionalGeneration(Qwen2_5_VLPreTrainedModel, GenerationMi
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         
+
+        if isinstance(pixel_values_list, torch.Tensor):
+            batched_pixel_values = pixel_values_list.reshape(-1, *pixel_values_list.shape[2:])
+            batched_image_grid_thw = image_grid_thw_list.reshape(-1, 3)
+        else: # list
+            batched_pixel_values = torch.cat(pixel_values_list, dim=0)
+            batched_image_grid_thw = torch.cat(image_grid_thw_list, dim=0)
+        batched_image_embeds = self.visual(batched_pixel_values, grid_thw=batched_image_grid_thw)
+        batched_length, channels = batched_image_embeds.shape
+        bs = len(input_ids_list)
+        single_length = batched_length // bs
+        batched_image_embeds = batched_image_embeds.reshape(bs, single_length, channels)
+
         
         position_ids_tensor = []
         attention_mask_tensor = []
         inputs_embeds_tensor = []
         # this is easy job, no computation at all, don't want to batchify
         # Process each input independently
-        for input_ids, attention_mask, pixel_values, image_grid_thw in zip(
+        for input_ids, attention_mask, visual_out, image_grid_thw in zip(
             input_ids_list,
             attention_mask_list,
-            pixel_values_list,
+            batched_image_embeds,
             image_grid_thw_list,
         ):
             # Create fresh inputs_embeds for each input (remove the if condition)
             current_inputs_embeds = self.model.embed_tokens(input_ids)
             
-            if pixel_values is not None:
-                pixel_values = pixel_values.type(self.visual.dtype)
-                image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
+            if visual_out is not None:
+                image_embeds = visual_out
                 n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
                 n_image_features = image_embeds.shape[0]
                 if n_image_tokens != n_image_features:
