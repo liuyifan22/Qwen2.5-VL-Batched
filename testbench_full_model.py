@@ -8,6 +8,7 @@ from PIL import Image
 import numpy as np
 import os
 import time
+from test_utils import just_pad
 
 def tensor_to_pil_images(tensor_images):
     """
@@ -143,8 +144,6 @@ for inputs in full_input_list:
 # forward in a batched manner
 
 # Forward through our batched model
-
-from modeling_qwen2_5_vl_batched import just_pad
 inputs_padded = just_pad(full_input_list, device=device)
 outputs_batched = model_batched.batched_forward(**inputs_padded)
 # torch.Size([4, 1, 140, 2048])

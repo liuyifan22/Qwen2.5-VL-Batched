@@ -32,3 +32,49 @@ def inputs_to_list(inputs):
         }
         for i in range(b)
     ]
+
+
+def just_pad(input_list, device):
+    """
+    Pad input_ids and attention_mask to same length and return as dict with lists
+    """
+    # Extract all components
+    input_ids_list = [inp['input_ids'].squeeze(0) for inp in input_list]
+    attention_mask_list = [inp['attention_mask'].squeeze(0) for inp in input_list]
+    
+    # Find max sequence length
+    max_seq_len = max(ids.shape[0] for ids in input_ids_list)
+    
+    # Initialize result lists
+    padded_input_ids = []
+    padded_attention_masks = []
+    pixel_values_list = []
+    image_grid_thw_list = []
+    
+    for i, inputs in enumerate(input_list):
+        ids = input_ids_list[i]
+        mask = attention_mask_list[i]
+        
+        pad_len = max_seq_len - ids.shape[0]
+        
+        if pad_len > 0:
+            # Pad with zeros (or tokenizer.pad_token_id)
+            padded_ids = torch.cat([ids, torch.zeros(pad_len, dtype=ids.dtype, device=ids.device)])
+            padded_mask = torch.cat([mask, torch.zeros(pad_len, dtype=mask.dtype, device=mask.device)])
+        else:
+            padded_ids = ids
+            padded_mask = mask
+        
+        # Add to lists (with batch dimension)
+        padded_input_ids.append(padded_ids.unsqueeze(0).to(device))
+        padded_attention_masks.append(padded_mask.unsqueeze(0).to(device))
+        pixel_values_list.append(inputs['pixel_values'].to(device))
+        image_grid_thw_list.append(inputs['image_grid_thw'].to(device))
+    
+    # Return as dict with lists
+    return {
+        'input_ids_list': padded_input_ids,
+        'attention_mask_list': padded_attention_masks,
+        'pixel_values_list': pixel_values_list,
+        'image_grid_thw_list': image_grid_thw_list
+    }

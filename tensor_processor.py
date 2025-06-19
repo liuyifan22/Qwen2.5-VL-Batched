@@ -96,3 +96,70 @@ class Qwen2_5_VLProcessorBatched(Qwen2_5_VLProcessor):
         text_inputs = self.tokenizer(text, **output_kwargs["text_kwargs"])
 
         return BatchFeature(data={**text_inputs, **image_inputs})
+
+
+if __name__ == "__main__":
+    self = Qwen2_5_VLProcessorBatched.from_pretrained('Qwen/Qwen2.5-VL-3B-Instruct')
+    images = torch.arange(224**2).reshape(1, 1, 224, 224)
+    # Unsqueeze: simulate a temporal dimension of 1
+    images = images[:, None]  # (B, 1, 3, h, w)
+    # Patchify: pad if necessary
+    if images.shape[1] % self._temporal_patch_size != 0:
+        pad_len = (
+            self._temporal_patch_size
+            - (images.shape[1] % self._temporal_patch_size)
+        )
+        repeats = images[:, -1:].repeat(1, pad_len, 1, 1, 1)
+        images = torch.cat([images, repeats], 1)  # (B, t, 3, h, w)
+
+    # Reshape contiguously
+    b, t, channel, h, w = images.shape
+    grid_h = h // self._patch_size
+    grid_w = w // self._patch_size
+    grid_t = t // self._temporal_patch_size
+    images1 = images.reshape(
+        b,
+        grid_t,
+        self._temporal_patch_size,
+        channel,
+        grid_h // self._merge_size,
+        self._merge_size,
+        self._patch_size,
+        grid_w // self._merge_size,
+        self._merge_size,
+        self._patch_size
+    ).permute(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)
+
+    # Reshape in a weird way
+    flattened = images1.reshape(
+        b * grid_t * grid_h * grid_w,
+        channel * self._temporal_patch_size * self._patch_size * self._patch_size
+    )
+
+    images2 = images.reshape(
+        b,
+        grid_t,
+        self._temporal_patch_size,
+        channel,
+        grid_h,
+        self._patch_size,
+        grid_w,
+        self._patch_size
+    ).permute(0, 1, 4, 6, 3, 2, 5, 7)
+
+    # Reshape in a non-weird way
+    flattened2 = images2.reshape(
+        b * grid_t * grid_h * grid_w,
+        channel * self._temporal_patch_size * self._patch_size * self._patch_size
+    )
+
+    # Compare sets of patch elements
+    # flattened = flattened.reshape(8, 2, 8, 2, 392).permute(0, 2, 1, 3, 4)
+    flattened = flattened.reshape(8*8, 2*2*392)
+    flattened2 = flattened2.reshape(8, 2, 8, 2, 392).permute(0, 2, 1, 3, 4)
+    flattened2 = flattened2.reshape(8*8, 2*2*392)
+    for fl1, fl2 in zip(flattened, flattened2):
+        # import ipdb; ipdb.set_trace()
+        assert set(fl1.cpu().numpy().tolist()) == set(fl2.cpu().numpy().tolist())
+
+    import ipdb; ipdb.set_trace()

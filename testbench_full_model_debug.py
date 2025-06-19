@@ -1,11 +1,10 @@
-from modeling_qwen2_5_vl_batched import Qwen2_5_VLForConditionalGeneration as Qwen2_5_VLForConditionalGenerationBatched
+from modeling_qwen2_5_vl_batched import Qwen2_5_VLForConditionalGenerationBatched
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration as Qwen2_5_VLForConditionalGenerationOriginal
 from transformers.models.qwen2_5_vl.processing_qwen2_5_vl import Qwen2_5_VLProcessor
 from tensor_processor import Qwen2_5_VLProcessorBatched
-from modeling_qwen2_5_vl_batched import just_pad
 import torch
 
-from test_utils import tensor_to_pil_images
+from test_utils import tensor_to_pil_images, just_pad
 
 
 def process_original(input_images, text_list):
