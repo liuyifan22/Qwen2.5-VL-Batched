@@ -1,6 +1,8 @@
 # Qwen 2.5 VL Batched Implementation
 
-A high-performance batched implementation of Qwen 2.5 Vision-Language model for efficient multi-image, multi-sample inference.
+Having a headache for Qwen2.5-VL's non-batched implementation?
+
+We provide a high-performance batched implementation of Qwen 2.5 Vision-Language model for efficient multi-image, multi-sample inference.
 
 ## Overview
 
@@ -14,23 +16,15 @@ This project provides an optimized batched version of the Qwen 2.5 VL model that
 - 📊 **Numerical Fidelity**: Experimented and guaranteed close numerical output with origianl model
 
 
-## Architecture
+## Core Components
 
-### Core Components
+- **Tensor Processor** (`qwen_batched/model/tensor_processor.py`): Batched preprocessing of images and text INSIDE the GPU memory, avoiding CPU-GPU transfer overhead.
+- **Batched Vision Transformer** (`qwen_batched/model/modeling_qwen2_5_vl_batched.py`): Optimized ViT implementation which processes batched images in parallel. Reducing computation from O(N^2) to O(N).
+- **Batched Decoder** (`qwen_batched/model/modeling_qwen2_5_vl_batched.py`): Efficient language model decoder which accepts batched inputs and generates features in parallel.
+- **Unified Model** (`qwen_batched/qwen_batched_VL_model.py`): High-level API wrapper, easy to use.
 
-- **Tensor Processor** (`tensor_processor.py`): Batched preprocessing of images and text
-- **Batched Vision Transformer** (`modeling_qwen2_5_vl_batched.py`): Optimized ViT implementation
-- **Batched Decoder** (`modeling_qwen2_5_vl_batched.py`): Efficient language model decoder
-- **Unified Model** (`qwen_batched_VL_model.py`): High-level API wrapper
 
-### Performance Optimizations
-
-- Vectorized image preprocessing
-- Batched attention computation
-- Memory-efficient padding strategies
-- Optimized tensor operations
-
-## Tested Environments
+## Tested Environment
 
 We do experiments on the following configurations:
 - Python 3.10
