@@ -1,4 +1,0 @@
-# we tested our code with the following versions
-CUDA 12.4
-pytorch==2.5.1
-transformers==4.51.1

@@ -1,2 +1,1 @@
-export CUDA_VISIBLE_DEVICES=4
-python testbench_full_model.py
+python -m qwen_batched.test_utils.testbench_full_model 
