@@ -19,7 +19,7 @@ This project provides an optimized batched version of the Qwen 2.5 VL model that
 ## Core Components
 
 - **Tensor Processor** (`qwen_batched/model/tensor_processor.py`): Batched preprocessing of images and text INSIDE the GPU memory, avoiding CPU-GPU transfer overhead.
-- **Batched Vision Transformer** (`qwen_batched/model/modeling_qwen2_5_vl_batched.py`): Optimized ViT implementation which processes batched images in parallel. Reducing computation from O(N^2) to O(N).
+- **Batched Vision Transformer** (`qwen_batched/model/modeling_qwen2_5_vl_batched.py`): Optimized ViT implementation which processes batched images in parallel. Reducing computation from O(N^2) to O(1).
 - **Batched Decoder** (`qwen_batched/model/modeling_qwen2_5_vl_batched.py`): Efficient language model decoder which accepts batched inputs and generates features in parallel.
 - **Unified Model** (`qwen_batched/qwen_batched_VL_model.py`): High-level API wrapper, easy to use.
 
