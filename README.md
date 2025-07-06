@@ -6,7 +6,9 @@ We provide a high-performance batched implementation of Qwen 2.5 Vision-Language
 
 ## Overview
 
-This project provides an optimized batched version of the Qwen 2.5 VL model that enables efficient processing of multiple images and text prompts simultaneously. The implementation focuses on maximizing GPU utilization and reducing inference latency for computer vision applications requiring multi-camera inputs. A typical use case includes extracting feature from large number of images with the Qwen2.5VL visual encoder.
+This project provides an optimized batched version of the Qwen 2.5 VL model that enables efficient processing of multiple images and text prompts simultaneously. The implementation focuses on maximizing GPU utilization and reducing inference latency for computer vision applications requiring multi-image inputs. A typical use case includes extracting feature from large number of images with the Qwen2.5VL visual encoder.
+
+The more image you input, the more performance you gain!
 
 ## Features
 
@@ -29,7 +31,7 @@ This project provides an optimized batched version of the Qwen 2.5 VL model that
 We do experiments on the following configurations:
 - Python 3.10
 - CUDA 12.4
-- pytorch==2.5.1
+- pytorch==2.5 / 2.6 
 - transformers==4.51.1
 
 ## Quick Start
