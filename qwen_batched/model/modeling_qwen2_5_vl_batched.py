@@ -21,6 +21,7 @@
 
 from typing import Any, List, Optional, Tuple, Union
 
+import einops
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -34,7 +35,6 @@ from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
     apply_multimodal_rotary_pos_emb,
     repeat_kv,
     Qwen2_5_VLAttention,
-    Qwen2_5_VLCausalLMOutputWithPast,
     Qwen2_5_VLVisionSdpaAttention,
     Qwen2_5_VLVisionBlock,
     Qwen2_5_VisionTransformerPretrainedModel,
@@ -70,6 +70,12 @@ class Qwen2_5_VLVisionSdpaAttentionBatched(Qwen2_5_VLVisionSdpaAttention):
         rotary_pos_emb=None,
         position_embeddings=None
     ):
+        """
+        hidden_states: (extended_batch_size, seq_length, embed_dim)
+        cu_seqlens: iterable of window boundaries
+
+        output: (extended_batch_size, seq_length, embed_dim)
+        """
         batch_size, seq_length, _ = hidden_states.shape
 
         """previously, we are not using cu_seqlens, which is bad."""
@@ -90,14 +96,12 @@ class Qwen2_5_VLVisionSdpaAttentionBatched(Qwen2_5_VLVisionSdpaAttention):
             cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb_vision(q, k, cos, sin)
 
-        # Adjusted attention mask
-        attention_mask = torch.full(
-            [batch_size, 1, seq_length, seq_length], torch.finfo(q.dtype).min, device=q.device, dtype=q.dtype
-        )
-        for i in range(1, len(cu_seqlens)):
-            attention_mask[..., cu_seqlens[i - 1] : cu_seqlens[i], cu_seqlens[i - 1] : cu_seqlens[i]] = 0
-        # import pdb; pdb.set_trace()
-        attn_output = F.scaled_dot_product_attention(q, k, v, attention_mask, dropout_p=0.0)
+        # Split into windows and run parallel attention
+        q = einops.rearrange(q, "b h (cu s) d -> (b cu) h s d", cu=len(cu_seqlens) - 1)
+        k = einops.rearrange(k, "b h (cu s) d -> (b cu) h s d", cu=len(cu_seqlens) - 1)
+        v = einops.rearrange(v, "b h (cu s) d -> (b cu) h s d", cu=len(cu_seqlens) - 1)
+        attn_output = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+        attn_output = einops.rearrange(attn_output, "(b cu) h s d -> b h (cu s) d", cu=len(cu_seqlens) - 1)
         attn_output = attn_output.transpose(1, 2).reshape(batch_size, seq_length, -1)
         attn_output = self.proj(attn_output)
         return attn_output
@@ -121,7 +125,7 @@ class Qwen2_5_VisionTransformerPretrainedModelBatched(Qwen2_5_VisionTransformerP
             [Qwen2_5_VLVisionBlockBatched(config, config._attn_implementation) for _ in range(config.depth)]
         )
 
-    def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
+    def forward(self, hidden_states, grid_thw):
         """
         Args:
             hidden_states (`torch.Tensor` of shape `(seq_len, hidden_size)`):
@@ -133,8 +137,6 @@ class Qwen2_5_VisionTransformerPretrainedModelBatched(Qwen2_5_VisionTransformerP
             `torch.Tensor`: hidden_states.
         """
         hidden_states = self.patch_embed(hidden_states)
-        
-        
         grid_thw_batch_one = grid_thw[0].unsqueeze(0)  # For batch processing, we assume all images have the same grid size
         rotary_pos_emb = self.rot_pos_emb(grid_thw_batch_one)
         window_index, cu_window_seqlens = self.get_window_index(grid_thw_batch_one)
@@ -143,18 +145,8 @@ class Qwen2_5_VisionTransformerPretrainedModelBatched(Qwen2_5_VisionTransformerP
             device=hidden_states.device,
             dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
         )
-        # import pdb; pdb.set_trace()
-        
-        # window index:tensor([ 0,  1,  2,  3,  8,  9, 10, 11, 16, 17, 18, 19, 24, 25, 26, 27,  4,  5,
-        #  6,  7, 12, 13, 14, 15, 20, 21, 22, 23, 28, 29, 30, 31, 32, 33, 34, 35,
-        # 40, 41, 42, 43, 48, 49, 50, 51, 56, 57, 58, 59, 36, 37, 38, 39, 44, 45,
-        # # 46, 47, 52, 53, 54, 55, 60, 61, 62, 63])
-        
-        
         cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
 
-        # import pdb; pdb.set_trace()
-        
         # pretend that we are processing a single image, so that we can use the original subwindow attention
         # This is a hack to make the code work for batch processing, we assume all images have the same grid size
         single_image_seq_length = int(grid_thw[0, 1] * grid_thw[0, 2])
@@ -164,17 +156,13 @@ class Qwen2_5_VisionTransformerPretrainedModelBatched(Qwen2_5_VisionTransformerP
         hidden_states = hidden_states.reshape(batch_size, single_image_seq_length // self.spatial_merge_unit, self.spatial_merge_unit, -1)
         hidden_states = hidden_states[:, window_index, :, :] # nonsense
         hidden_states = hidden_states.reshape(seq_len, -1)
-        
-        
         rotary_pos_emb = rotary_pos_emb.reshape(single_image_seq_length // self.spatial_merge_unit, self.spatial_merge_unit, -1)
         rotary_pos_emb = rotary_pos_emb[window_index, :, :]
         rotary_pos_emb = rotary_pos_emb.reshape(single_image_seq_length, -1) # this is another nonsense
         emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
         position_embeddings = (emb.cos(), emb.sin())
-        
-        
-        # manage to get the positional embeddings like the original implementation
 
+        # manage to get the positional embeddings like the original implementation
         cu_seqlens = torch.repeat_interleave(grid_thw_batch_one[:, 1] * grid_thw_batch_one[:, 2], grid_thw_batch_one[:, 0]).cumsum(
             dim=0,
             # Select dtype based on the following factors:
@@ -185,15 +173,11 @@ class Qwen2_5_VisionTransformerPretrainedModelBatched(Qwen2_5_VisionTransformerP
         )
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
-        # import pdb; pdb.set_trace()
         # reshape hidden_states to support batch processing
         seq_length_sum, _ = hidden_states.shape
         batch_size = seq_length_sum // single_image_seq_length
         hidden_states = hidden_states.reshape(batch_size, single_image_seq_length, -1)  # B, h*w, embed_dim
-        
-        # self.fullatt_block_indexes
-        # print("self.fullatt_block_indexes:", self.fullatt_block_indexes)
-        # import pdb; pdb.set_trace()
+
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
@@ -214,36 +198,6 @@ class Qwen2_5_VisionTransformerPretrainedModelBatched(Qwen2_5_VisionTransformerP
         hidden_states = hidden_states.reshape(batch_size * len(window_index), -1)
 
         return hidden_states
-    
-    
-    """The github author version. not considering the window seq attn."""
-    # def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
-    #     hidden_states = self.patch_embed(hidden_states)
-    #     rotary_pos_emb = self.rot_pos_emb(grid_thw)
-
-    #     cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
-    #         dim=0, dtype=torch.int32
-    #     )
-    #     cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
-        
-    #     # Modified: Seq===>Batch
-    #     single_image_seq_length = int(grid_thw[0, 1] * grid_thw[0, 2])
-    #     seq_length_sum, _ = hidden_states.shape
-        
-    #     """Here, we can only handle the case where all images have the same spatial size. (which is often the case in practice)"""
-        
-    #     batch_size = seq_length_sum // single_image_seq_length
-        
-    #     # change the shape of hidden_states and rotary_pos_emb to support batch processing
-    #     hidden_states = hidden_states.reshape(batch_size, single_image_seq_length, -1)  # B, h*w, embed_dim
-    #     rotary_pos_emb = rotary_pos_emb.reshape(batch_size, single_image_seq_length, -1)  # B, h*w, head_dim
-
-    #     for blk in self.blocks:
-    #         hidden_states = blk(hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)
-        
-    #     # Modified: Batch===>Seq
-    #     hidden_states = hidden_states.reshape(batch_size * single_image_seq_length, -1)
-    #     return self.merger(hidden_states)
 
 
 class Qwen2_5_VLRotaryEmbeddingBatched(Qwen2_5_VLRotaryEmbedding):
@@ -310,7 +264,7 @@ class Qwen2_5_VLSdpaAttention(Qwen2_5_VLAttention):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings_list: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
+        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
         **kwargs: Any,  # Additional arguments for BC
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         if output_attentions:
@@ -327,16 +281,14 @@ class Qwen2_5_VLSdpaAttention(Qwen2_5_VLAttention):
                 output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
-                position_embeddings=position_embeddings_list,
+                position_embeddings=position_embeddings,
             )
-            
-        # print("using sdpa attn")
 
         # Handle batched input dimension squeezing (same as FlashAttention)
         if hidden_states.dim() == 4:
             hidden_states = hidden_states.squeeze(1)  # Remove the redundant batch dimension if it is 1 
             attention_mask = attention_mask.squeeze(1)  # Remove the redundant batch dimension if it is 1
-            # import pdb; pdb.set_trace()
+
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
@@ -351,8 +303,8 @@ class Qwen2_5_VLSdpaAttention(Qwen2_5_VLAttention):
         # Apply rotary position embeddings per batch item (same as FlashAttention)
         query_states_list = []
         key_states_list = []
-        for i in range(len(position_embeddings_list)):
-            cos, sin = position_embeddings_list[i]
+        for i in range(len(position_embeddings)):
+            cos, sin = position_embeddings[i]
             this_query_states, this_key_states = query_states[i].unsqueeze(0), key_states[i].unsqueeze(0)
             this_query_states, this_key_states = apply_multimodal_rotary_pos_emb(
                 this_query_states, this_key_states, cos, sin, self.rope_scaling["mrope_section"]
@@ -361,10 +313,6 @@ class Qwen2_5_VLSdpaAttention(Qwen2_5_VLAttention):
             key_states_list.append(this_key_states)
         query_states = torch.cat(query_states_list, dim=0)
         key_states = torch.cat(key_states_list, dim=0)
-
-        # if past_key_value is not None:
-        #     cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}  # Specific to RoPE models
-        #     key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -411,75 +359,6 @@ class Qwen2_5_VLDecoderLayerBatched(Qwen2_5_VLDecoderLayer):
     def __init__(self, config, layer_idx):
         super().__init__(config, layer_idx)
         self.self_attn = Qwen2_5_VLSdpaAttention(config, layer_idx)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value: Optional[Tuple[torch.FloatTensor]] = None,
-        output_attentions: Optional[bool] = False,
-        use_cache: Optional[bool] = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        position_embeddings: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # necessary, but kept here for BC
-        text_length=0,
-        use_text=True,
-        **kwargs,
-    ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
-        """
-        Args:
-            hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
-            attention_mask (`torch.FloatTensor`, *optional*): attention mask of size
-                `(batch, sequence_length_points, k_points)` where padding elements are indicated by 0.
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-            use_cache (`bool`, *optional*):
-                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
-                (see `past_key_values`).
-            past_key_value (`Tuple(torch.FloatTensor)`, *optional*): cached past key and value projection states
-            cache_position (`torch.LongTensor` of shape `(sequence_length)`, *optional*):
-                Indices depicting the position of the input sequence tokens in the sequence.
-            position_embeddings (`Tuple[torch.FloatTensor, torch.FloatTensor]`, *optional*):
-                Tuple containing the cosine and sine positional embeddings of shape `(batch_size, seq_len, head_dim)`,
-                with `head_dim` being the embedding dimension of each attention head.
-        """
-
-        residual = hidden_states
-
-        hidden_states = self.input_layernorm(hidden_states) # B, N+L, dim
-
-        # Self Attention
-        # print("inside decoder layer")
-        
-        """This function is already modified"""
-        hidden_states, self_attn_weights, present_key_value = self.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-            cache_position=cache_position,
-            position_embeddings_list=position_embeddings,
-        )
-        hidden_states = residual + hidden_states
-
-        # Fully Connected
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
-
-        outputs = (hidden_states,)
-
-        if output_attentions:
-            outputs += (self_attn_weights,)
-
-        if use_cache:
-            outputs += (present_key_value,)
-
-        return outputs
 
 
 class Qwen2_5_VLModelBatched(Qwen2_5_VLModel):
@@ -543,10 +422,6 @@ class Qwen2_5_VLModelBatched(Qwen2_5_VLModel):
         elif position_ids.dim() == 2:
             position_ids = position_ids[None, ...].expand(3, position_ids.shape[0], -1)
 
-        
-        # assert not (inputs_embeds[0]==inputs_embeds[2]).all() # avoid all same inputs, only for debug
-
-        
         # if not self._attn_implementation == "flash_attention_2": # use 4d mask
         causal_mask_list = []
         for i in range(position_ids.shape[0]):
@@ -554,10 +429,8 @@ class Qwen2_5_VLModelBatched(Qwen2_5_VLModel):
                 attention_mask[i], inputs_embeds[i], cache_position, past_key_values, output_attentions
             )
             causal_mask_list.append(causal_mask)
-            # import pdb; pdb.set_trace()
+
         causal_mask = torch.stack(causal_mask_list, dim=0)
-        # else:
-        #     causal_mask = attention_mask
 
         hidden_states = inputs_embeds
 
@@ -566,7 +439,6 @@ class Qwen2_5_VLModelBatched(Qwen2_5_VLModel):
         for i in range(position_ids.shape[0]):
             position_embeddings = self.rotary_emb(hidden_states[i], position_ids[i])
             position_embeddings_list.append(position_embeddings)
-        
 
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
@@ -653,23 +525,6 @@ class Qwen2_5_VLModelBatched(Qwen2_5_VLModel):
         past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
         using_static_cache = isinstance(past_key_values, StaticCache)
         using_sliding_window_cache = isinstance(past_key_values, SlidingWindowCache)
-
-        # When output attentions is True, sdpa implementation's forward method calls the eager implementation's forward
-        
-        """Yifan: Abrupt changes"""
-        # if (
-        #     self.config._attn_implementation == "sdpa"
-        #     and not (using_static_cache or using_sliding_window_cache)
-        #     and not output_attentions
-        # ):
-        #     if AttentionMaskConverter._ignore_causal_mask_sdpa(
-        #         attention_mask,
-        #         inputs_embeds=input_tensor,
-        #         past_key_values_length=past_seen_tokens,
-        #         sliding_window=self.config.sliding_window,
-        #         is_training=self.training,
-        #     ):
-        #         return None
 
         dtype, device = input_tensor.dtype, input_tensor.device
         min_dtype = torch.finfo(dtype).min

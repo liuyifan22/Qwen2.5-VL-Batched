@@ -6,6 +6,8 @@ import torch
 
 from qwen_batched.model.utils import tensor_to_pil_images, just_pad
 
+from time import time
+
 
 def process_original(input_images, text_list):
     # Convert to PIL images (for standard processor)
@@ -128,7 +130,10 @@ if __name__ == "__main__":
 
     # Original forward pass
     full_input_list = process_original(input_images, text_list)
-    outputs_original = forward_original(full_input_list)
+    t = time()
+    for _ in range(10):
+        outputs_original = forward_original(full_input_list)
+    print("Non-batched:", time() - t)
 
     # Batched processing
     inputs_batched = process_batch(input_images, text_list)
@@ -157,10 +162,10 @@ if __name__ == "__main__":
     abs_error = torch.abs(bat - ori)
     rel_error = abs_error / (torch.abs(ori) + 1)
 
-    print(f"Max abs error:  {abs_error.max().item():.6f}")
-    print(f"Mean abs error: {abs_error.mean().item():.6f}")
-    print(f"Max rel error:  {rel_error.max().item():.6f}")
-    print(f"Mean rel error: {rel_error.mean().item():.6f}")
+    print(f"Max abs error:  {abs_error.max().item():.8f}")
+    print(f"Mean abs error: {abs_error.mean().item():.8f}")
+    print(f"Max rel error:  {rel_error.max().item():.8f}")
+    print(f"Mean rel error: {rel_error.mean().item():.8f}")
 
     # Insanity: compare just_pad outputs to inputs_batched
     inputs_padded = just_pad(full_input_list, device=device)
@@ -198,7 +203,10 @@ if __name__ == "__main__":
             outputs_batched = forward_batched(full_input_list)  # B 1 ntok 2048
         elif exp == 1:
             print("Using batched processor")
-            outputs_batched = forward_batched2(inputs_batched)  # B 1 ntok 2048
+            t = time()
+            for _ in range(10):
+                outputs_batched = forward_batched2(inputs_batched)  # B 1 ntok 2048
+            print("Batched:", time() - t)
         else:
             print("Using batched processor but non-batched pixel values")
             outputs_batched = forward_batched3(list_inputs_batched)
