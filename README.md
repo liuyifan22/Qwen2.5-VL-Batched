@@ -2,13 +2,63 @@
 
 Having a headache for Qwen2.5-VL's non-batched implementation?
 
-We provide a high-performance batched implementation of Qwen 2.5 Vision-Language model for efficient multi-image, multi-sample inference.
+We provide an (unofficial) high-performance batched implementation of Qwen 2.5 Vision-Language model for efficient multi-image, multi-sample inference.
 
 ## Overview
 
-This project provides an optimized batched version of the Qwen 2.5 VL model that enables efficient processing of multiple images and text prompts simultaneously. The implementation focuses on maximizing GPU utilization and reducing inference latency for computer vision applications requiring multi-image inputs. A typical use case includes extracting feature from large number of images with the Qwen2.5VL visual encoder.
+This project provides a batched version of the Qwen 2.5 VL model that enables efficient processing of multiple images and text prompts simultaneously. The implementation focuses on maximizing GPU utilization and reducing inference latency for computer vision applications requiring multi-image inputs. A typical use case includes extracting feature from large number of images with the Qwen2.5VL visual encoder **because our implementation is over 10x more efficient.**
 
-The more image you input, the more performance you gain!
+
+## Core Components
+
+- **Tensor Processor** (`qwen_batched/model/tensor_processor.py`): Batched preprocessing of images and text INSIDE the GPU memory, avoiding CPU-GPU transfer overhead.
+- **Batched Vision Transformer** (`qwen_batched/model/modeling_qwen2_5_vl_batched.py`): Optimized ViT implementation which processes batched images in parallel. 
+- **Batched Decoder** (`qwen_batched/model/modeling_qwen2_5_vl_batched.py`): Efficient language model decoder which accepts batched inputs and generates features in parallel.
+- **Unified Model** (`qwen_batched/qwen_batched_VL_model.py`): High-level API wrapper, easy to use.
+
+## Performance Gain
+
+### Tensor Processor
+
+Batched processor has a significant speedup of **28.3x** compared to the original processor which copies images back to cpu for processing. The batched processor processes images directly on the GPU, which reduces the overhead of transferring data between CPU and GPU.
+```
+Original processor (sequential): 4.1293s for 50 runs
+Batched processor: 0.1460s for 50 runs
+Speedup: 28.29x
+Per-sample original: 10.32ms
+Per-sample batched: 0.36ms
+```
+
+### Visual Encoder
+We tested on a single NVIDIA A6000 GPU, with 64 images of resolution 448*448, the batched implementation achieves a speedup of approximately **12.8x** compared to the original Qwen 2.5 VL model. 
+```
+Original visual encoder (sequential): 731.3958s for 10 runs
+Batched visual encoder: 57.0890s for 10 runs
+Speedup: 12.81x
+Per-image original: 1142.81ms
+Per-image batched: 89.20ms
+```
+
+Also noteworthy is that our batched version significantly saves GPU memroy (**~49%**):
+```
+Original visual encoder memory usage: 38723MB
+Batched visual encoder memory usage: 19939MB
+```
+
+### Full Model
+We tested on a single NVIDIA A6000 GPU, with a batch size of 4 samples, achieving a speedup of approximately **1.5x** compared to the original Qwen 2.5 VL model. 
+```
+Original full model (sequential): 22.1588s for 10 runs
+Batched full model: 14.9090s for 10 runs
+Speedup: 1.49x
+Per-sample original: 553.97ms
+Per-sample batched: 372.73ms
+```
+
+To reproduce the results, you can run the following command:
+```bash
+bash test_speed.sh
+```
 
 ## Features
 
@@ -17,13 +67,6 @@ The more image you input, the more performance you gain!
 - 🔧 **Modular Implementation**: Either of the tree modules can be utilized freely
 - 📊 **Numerical Fidelity**: Experimented and guaranteed close numerical output with origianl model
 
-
-## Core Components
-
-- **Tensor Processor** (`qwen_batched/model/tensor_processor.py`): Batched preprocessing of images and text INSIDE the GPU memory, avoiding CPU-GPU transfer overhead.
-- **Batched Vision Transformer** (`qwen_batched/model/modeling_qwen2_5_vl_batched.py`): Optimized ViT implementation which processes batched images in parallel. Reducing computation from O(N^2) to O(1).
-- **Batched Decoder** (`qwen_batched/model/modeling_qwen2_5_vl_batched.py`): Efficient language model decoder which accepts batched inputs and generates features in parallel.
-- **Unified Model** (`qwen_batched/qwen_batched_VL_model.py`): High-level API wrapper, easy to use.
 
 
 ## Tested Environment
@@ -36,10 +79,14 @@ We do experiments on the following configurations:
 
 ## Quick Start
 
-### Input and Output
+## Input and Output
 The batched implementation accepts inputs in the following format:
 - **Images**: A tensor of shape `(B, n_cameras, 3, H, W)` where `B` is the batch size, `n_cameras` is the number of cameras, and `(H, W)` is the image resolution.
 - **Texts**: A list of strings, where each string corresponds to a text prompt for each sample in the batch.
+- **Assumptions**: 
+1. each batch has same number of images, each image is of same shape
+2. for the processor to exhibit its advantage, images should already be on gpu as torch.tensor (not a local url)
+3. we use it as batched Qwen feature extractor, not the whole generative method.
 
 The output is a list of hidden states from the model, which can be used for downstream tasks like feature extraction or text generation. You may easily modify this to return the logits or generated text for your application.
 
@@ -73,24 +120,22 @@ bash test.sh
 We welcome contributions! Please contact us via GitHub issues or pull requests.
 
 
-
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the MIT License.
 
 ## Citation
 
-If you find our project useful, please cite:
+If you find our project useful, please star our repo, thanks!
 
 ```bibtex
 @misc{qwen_batched_2025,
   title={Qwen 2.5 VL Batched Implementation},
   author={Yifan Liu and Nikolaos Gkanatsios},
   year={2025},
-  url={https://github.com/liuyifan22/qwen_batched}
+  url={https://github.com/liuyifan22/Qwen2.5-VL-Batched},
 }
 ```
-
 ## Acknowledgments
 
 - [Qwen Team](https://github.com/QwenLM/Qwen2-VL) for the original implementation
