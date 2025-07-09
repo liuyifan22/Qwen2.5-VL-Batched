@@ -8,7 +8,7 @@ model = QwenBatchedVLModel().to(device)
 images = torch.rand(2, 8, 3, 224, 224, device=device)  # B=2, ncam=8
 texts = [
     "What do you see?",
-    "Describe this."
+    "Describe this image."
 ]
 
 # get logits / generated token IDs
