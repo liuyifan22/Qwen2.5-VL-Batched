@@ -6,7 +6,7 @@ We provide an (unofficial) high-performance batched implementation of Qwen 2.5 V
 
 ## Overview
 
-This project provides a batched version of the Qwen 2.5 VL model that enables efficient processing of multiple images and text prompts simultaneously. The implementation focuses on maximizing GPU utilization and reducing inference latency for computer vision applications requiring multi-image inputs. A typical use case includes extracting feature from large number of images with the Qwen2.5VL visual encoder **because our implementation is over 10x more efficient.**
+This project provides a batched version of the Qwen 2.5 VL model that enables efficient processing of multiple images and text prompts simultaneously. The implementation focuses on maximizing GPU utilization and reducing inference latency for computer vision applications requiring multi-image inputs. A typical use case includes extracting feature from a large number of images with the Qwen2.5VL visual encoder, **where our implementation is over 10x more efficient.**
 
 
 ## Core Components
@@ -65,7 +65,7 @@ bash test_speed.sh
 - 🚀 **Batched Processing**: Process multiple samples and cameras in a single forward pass
 - 🖥️ **Flow Optimized**: Avoid frequent transfer between CPU and GPU
 - 🔧 **Modular Implementation**: Either of the tree modules can be utilized freely
-- 📊 **Numerical Fidelity**: Experimented and guaranteed close numerical output with origianl model
+- 📊 **Numerical Fidelity**: Experimented and guaranteed close numerical output with original model
 
 
 
